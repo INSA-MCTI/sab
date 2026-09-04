@@ -19,7 +19,7 @@
             d3 = $window.d3;
 
             // Set the dimensions of the canvas / graph
-            var margin = {top: 5, right: 10, bottom: 5, left: 0},
+            var margin = {top: 14, right: 10, bottom: 5, left: 0},
                 width = 100 - margin.left - margin.right,
                 height = 50 - margin.top - margin.bottom,
                 statusWidth = 10,
@@ -59,6 +59,16 @@
             var endCircle = svg.append('circle');
             var triangle = svg.append('polygon')
               .attr("points", "0,0 "+statusWidth+",0 "+statusHeight+","+statusHeight+"");
+
+            // Rótulos de volume inicial e final
+            var labelStart = svg.append('text')
+              .attr('y', -3)
+              .attr('font-size', '7px')
+              .attr('text-anchor', 'start');
+            var labelEnd = svg.append('text')
+              .attr('y', -3)
+              .attr('font-size', '7px')
+              .attr('text-anchor', 'end');
 
             scope.$watch(function(scope) { return scope.monitoramento; }, function(newValue) {
               if ((typeof newValue !== 'undefined') && (newValue.volumes.length !== 0)) {
@@ -111,6 +121,18 @@
                   "visibility": regression === 0 ? "hidden" : "visible"
                 })
                 .attr("transform", rotate(regression));
+
+              // Rótulos: valor inicial (esquerda) e final (direita)
+              var firstVal = minData[0].close;
+              var lastVal  = minData[minData.length - 1].close;
+              labelStart
+                .attr('x', 0)
+                .style('fill', color(regression))
+                .text(Number(firstVal.toFixed(1)) + '%');
+              labelEnd
+                .attr('x', width - statusWidth - 2)
+                .style('fill', color(regression))
+                .text(Number(lastVal.toFixed(1)) + '%');
 
             function color(slope) {
               if (slope > 0) {

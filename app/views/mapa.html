@@ -66,7 +66,7 @@
                 <br><br><br>
                 Não possui dados sobre volume
               </div>
-              <div class="info-card-row info-card-row-small" ng-show="ctrl.reservatorioSelecionado.volume">
+              <div class="info-card-row info-card-row-small" ng-show="ctrl.reservatorioSelecionado.volume && ctrl.reservatorioSelecionado.data_informacao && ctrl.reservatorioSelecionado.data_informacao.indexOf('%') === -1">
                 Última atualização: {{ctrl.reservatorioSelecionado.data_informacao}} (Fonte: {{ctrl.reservatorioSelecionado.fonte}})
               </div>
 

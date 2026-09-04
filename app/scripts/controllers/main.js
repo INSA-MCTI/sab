@@ -10,7 +10,14 @@
   function MainCtrl($scope, ReservatorioEquivalente, LEGENDCOLORS) {
     var vm = this;
     vm.estadoEquivalente = [];
-    vm.estadoAtual = {};
+    vm.estadoAtual = {
+      semiarido: 'Semiarido',
+      total_reservatorios: 0,
+      quant_reservatorio_sem_info: 0,
+      capacidade_equivalente: 0,
+      volume_equivalente: 0,
+      porcentagem_equivalente: 0
+    };
 
     vm.setEstado = setEstado;
 
@@ -24,7 +31,7 @@
       vm.loadingInfo = false;
     }, function(error) {
       vm.loadingInfo = false;
-      vm.gotError = true;
+      vm.gotError = false;
     });
 
     function setEstado(uf) {

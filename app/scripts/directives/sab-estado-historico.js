@@ -329,11 +329,11 @@
           var draw = function(data, volumemorto) {
             var dataValidos = [];
             data.forEach(function(d) {
-              d.date = parseDate(d.DataInformacao);
+              d.date = d.DataInformacao ? parseDate(d.DataInformacao) : null;
               d.VolumePercentualTotal<100? d.close = d.VolumePercentualTotal: d.close = 100 ;
               d.VolumePercentualSemAgua>0? d.valueTop  = d.VolumePercentualSemAgua : d.valueTop  = 0;
               d.valueMiddle = (100 - (d.VolumePercentualTotal+d.VolumePercentualSemAgua));
-              if (d.VolumePercentualTotal){
+              if (d.VolumePercentualTotal && d.date){
                 dataValidos.push(d);
               }
             });
@@ -351,14 +351,16 @@
 
 
 
-            // Scale the range of the data
-            var max = d3.max(data, function(d) { return parseFloat(d.close); });
+            // Scale the range of the data (usa apenas registros com datas válidas)
+            if (dataValidos.length < 2) { return; }
+            var max = d3.max(dataValidos, function(d) { return parseFloat(d.close); });
             if (max < 100) { max = 100;}
-            var extent = d3.extent(data, function(d) { return d.date; });
+            var extent = d3.extent(dataValidos, function(d) { return d.date; });
+            if (!extent[0] || !extent[1]) { return; }
             var months = diffMouths(extent);
             var brushExtent = extent;
             if (months > 120) {
-              var endDate = data[data.length-1].date;
+              var endDate = dataValidos[dataValidos.length-1].date;
               var startDate = new Date(endDate);
               startDate = new Date(startDate.setMonth(startDate.getMonth() - 120));
               brushExtent = [startDate, endDate];

@@ -8,6 +8,20 @@
 // 'test/spec/**/*.js'
 
 module.exports = function (grunt) {
+  var http = require('http');
+  var https = require('https');
+  var urlParser = require('url');
+  // Compatibility shim for legacy connect/send packages on modern Node versions.
+  if (!Object.getOwnPropertyDescriptor(http.ServerResponse.prototype, '_headers')) {
+    Object.defineProperty(http.ServerResponse.prototype, '_headers', {
+      configurable: true,
+      enumerable: false,
+      get: function() {
+        return this.getHeaders ? this.getHeaders() : {};
+      }
+    });
+  }
+
   var api;
   var env = grunt.option('env');
   if (env==="prod") {
@@ -15,22 +29,77 @@ module.exports = function (grunt) {
   } else {
     api = require('./bower.json').development;
   }
+
+  function createApiProxy(targetBaseUrl) {
+    var target = urlParser.parse(targetBaseUrl);
+    var transport = target.protocol === 'https:' ? https : http;
+    var targetPath = (target.pathname || '').replace(/\/$/, '');
+
+    return function(req, res, next) {
+      if (req.url.indexOf('/api') !== 0) {
+        return next();
+      }
+
+      var proxyRequest = transport.request({
+        protocol: target.protocol,
+        hostname: target.hostname,
+        port: target.port || (target.protocol === 'https:' ? 443 : 80),
+        method: req.method,
+        path: targetPath + req.url.replace(/^\/api/, ''),
+        headers: Object.assign({}, req.headers, {
+          host: target.host
+        })
+      }, function(proxyResponse) {
+        res.writeHead(proxyResponse.statusCode, proxyResponse.headers);
+        proxyResponse.pipe(res);
+      });
+
+      proxyRequest.on('error', function(error) {
+        res.statusCode = 502;
+        res.end('API proxy error: ' + error.message);
+      });
+
+      req.pipe(proxyRequest);
+    };
+  }
+
+  var apiProxyMiddleware = createApiProxy(api);
+
   var
     path = require('path'),
     swPrecache = require('sw-precache'),
-    cacheConfig = require('./cache-config.js');
+    cacheConfig = require('./cache-config.js'),
+    sassCompiler = require('sass');
 
   grunt.loadNpmTasks('grunt-string-replace');
   // Time how long tasks take. Can help when optimizing build times
   require('time-grunt')(grunt);
 
-  // Automatically load required Grunt tasks
-  require('jit-grunt')(grunt, {
-    useminPrepare: 'grunt-usemin',
-    ngtemplates: 'grunt-angular-templates',
-    cdnify: 'grunt-google-cdn',
-    deploy: 'grunt-ssh-deploy'
-  });
+  // Explicit task loading for compatibility with legacy plugins on modern Node versions.
+  [
+    'grunt-angular-templates',
+    'grunt-concurrent',
+    'grunt-contrib-clean',
+    'grunt-contrib-concat',
+    'grunt-contrib-connect',
+    'grunt-contrib-copy',
+    'grunt-contrib-cssmin',
+    'grunt-contrib-htmlmin',
+    'grunt-contrib-imagemin',
+    'grunt-contrib-jshint',
+    'grunt-contrib-uglify',
+    'grunt-contrib-watch',
+    'grunt-filerev',
+    'grunt-jscs',
+    'grunt-ng-annotate',
+    'grunt-postcss',
+    'grunt-string-replace',
+    'grunt-svgmin',
+    'grunt-usemin',
+    'grunt-wiredep',
+    'grunt-ssh',
+    'grunt-ssh-deploy'
+  ].forEach(grunt.loadNpmTasks);
 
   // Configurable paths for the application
   var appConfig = {
@@ -44,8 +113,11 @@ module.exports = function (grunt) {
     // Project settings
     yeoman: appConfig,
 
-    // Load credentials
-    secret: grunt.file.readJSON('secret.json'),
+    // Load credentials (optional in local development)
+    secret: grunt.file.exists('secret.json') ? grunt.file.readJSON('secret.json') : {
+      development: {},
+      production: {}
+    },
 
     environments: {
       options: {
@@ -84,30 +156,18 @@ module.exports = function (grunt) {
       js: {
         files: ['<%= yeoman.app %>/scripts/{,*/}*.js'],
         tasks: ['newer:jshint:all', 'newer:jscs:all'],
-        options: {
-          livereload: '<%= connect.options.livereload %>'
-        }
+        options: {}
       },
       jsTest: {
         files: ['test/spec/{,*/}*.js'],
         tasks: ['newer:jshint:test', 'newer:jscs:test', 'karma']
       },
-      compass: {
+      styles: {
         files: ['<%= yeoman.app %>/styles/{,*/}*.{scss,sass}'],
-        tasks: ['compass:server', 'postcss:server']
+        tasks: ['sassCompile:server', 'postcss:server']
       },
       gruntfile: {
         files: ['Gruntfile.js']
-      },
-      livereload: {
-        options: {
-          livereload: '<%= connect.options.livereload %>'
-        },
-        files: [
-          '<%= yeoman.app %>/{,*/}*.html',
-          '.tmp/styles/{,*/}*.css',
-          '<%= yeoman.app %>/images/{,*/}*.{png,jpg,jpeg,gif,webp,svg}'
-        ]
       }
     },
 
@@ -116,14 +176,14 @@ module.exports = function (grunt) {
       options: {
         port: 9000,
         // Change this to '0.0.0.0' to access the server from outside.
-        hostname: 'localhost',
-        livereload: 35729
+        hostname: 'localhost'
       },
       livereload: {
         options: {
           open: true,
           middleware: function (connect) {
             return [
+              apiProxyMiddleware,
               connect.static('.tmp'),
               connect().use(
                 '/bower_components',
@@ -270,32 +330,37 @@ module.exports = function (grunt) {
       }
     },
 
-    // Compiles Sass to CSS and generates necessary files if requested
-    compass: {
-      options: {
-        sassDir: '<%= yeoman.app %>/styles',
-        cssDir: '.tmp/styles',
-        generatedImagesDir: '.tmp/images/generated',
-        imagesDir: '<%= yeoman.app %>/images',
-        javascriptsDir: '<%= yeoman.app %>/scripts',
-        fontsDir: '<%= yeoman.app %>/styles/fonts',
-        importPath: './bower_components',
-        httpImagesPath: '/images',
-        httpGeneratedImagesPath: '/images/generated',
-        httpFontsPath: '/styles/fonts',
-        relativeAssets: false,
-        assetCacheBuster: false,
-        raw: 'Sass::Script::Number.precision = 10\n'
+    // Compiles Sass to CSS using dart-sass (Node), replacing compass/ruby
+    sassCompile: {
+      server: {
+        options: {
+          style: 'expanded',
+          sourceMap: true
+        },
+        files: [{
+          src: '<%= yeoman.app %>/styles/main.scss',
+          dest: '.tmp/styles/main.css'
+        }]
+      },
+      test: {
+        options: {
+          style: 'expanded',
+          sourceMap: false
+        },
+        files: [{
+          src: '<%= yeoman.app %>/styles/main.scss',
+          dest: '.tmp/styles/main.css'
+        }]
       },
       dist: {
         options: {
-          generatedImagesDir: '<%= yeoman.dist %>/images/generated'
-        }
-      },
-      server: {
-        options: {
-          sourcemap: true
-        }
+          style: 'expanded',
+          sourceMap: false
+        },
+        files: [{
+          src: '<%= yeoman.app %>/styles/main.scss',
+          dest: '.tmp/styles/main.css'
+        }]
       }
     },
 
@@ -489,13 +554,13 @@ module.exports = function (grunt) {
     // Run some tasks in parallel to speed up the build process
     concurrent: {
       server: [
-        'compass:server'
+        'sassCompile:server'
       ],
       test: [
-        'compass'
+        'sassCompile:test'
       ],
       dist: [
-        'compass:dist',
+        'sassCompile:dist',
         'imagemin',
         'svgmin'
       ]
@@ -530,6 +595,36 @@ module.exports = function (grunt) {
         rootDir: '<%= yeoman.dist %>'
       }
     }
+  });
+
+  grunt.registerMultiTask('sassCompile', function() {
+    var options = this.options({
+      style: 'expanded',
+      sourceMap: false
+    });
+
+    this.files.forEach(function(file) {
+      var src = file.src && file.src[0];
+      if (!src || !grunt.file.exists(src)) {
+        grunt.fail.warn('Sass source file not found: ' + src);
+        return;
+      }
+
+      var result = sassCompiler.compile(src, {
+        style: options.style,
+        sourceMap: !!options.sourceMap,
+        loadPaths: [
+          path.resolve('app/styles'),
+          path.resolve('bower_components')
+        ]
+      });
+
+      grunt.file.write(file.dest, result.css);
+
+      if (options.sourceMap && result.sourceMap) {
+        grunt.file.write(file.dest + '.map', JSON.stringify(result.sourceMap));
+      }
+    });
   });
 
   grunt.registerMultiTask('swPrecache', function() {
@@ -584,7 +679,6 @@ module.exports = function (grunt) {
     'concat',
     'ngAnnotate',
     'copy:dist',
-    'cdnify',
     'cssmin',
     'uglify',
     'filerev',

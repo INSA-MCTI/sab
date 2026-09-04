@@ -27,9 +27,9 @@
       'toastr',
       'updateMeta'])
     .constant('RESTAPI', {
-      url: 'https://apiteste.insa.gov.br',
+      url: 'http://localhost:5003/api',
       facebookAppID: '543791825832138',
-      publicImagesPath: 'https://olhonagua.lsd.ufcg.edu.br/public/'
+      publicImagesPath: 'http://localhost:9000/images/'
     })
     .constant('LEGENDCOLORS', {
       reservoirsColors: [
@@ -125,8 +125,17 @@
       }
     });
 
-  	var worker = 'service-worker.js';
-  	ServiceWorker.registerWorker(worker);
+    var isLocalDev = /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname);
+    if (isLocalDev && navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+      navigator.serviceWorker.getRegistrations().then(function(registrations) {
+        registrations.forEach(function(registration) {
+          registration.unregister();
+        });
+      });
+    } else {
+      var worker = 'service-worker.js';
+      ServiceWorker.registerWorker(worker);
+    }
   }
 
 })();

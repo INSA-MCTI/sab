@@ -4,10 +4,10 @@
   angular.module('sabApp')
     .controller('MapaCtrl', MapaCtrl);
 
-  MapaCtrl.$inject = ['$scope', 'Reservatorio', 'RESTAPI','LEGENDCOLORS', 'olData', '$location'];
+  MapaCtrl.$inject = ['$scope', 'Reservatorio', 'RESTAPI','LEGENDCOLORS', 'olData', '$location', '$timeout', '$window'];
 
   /*jshint latedef: nofunc */
-  function MapaCtrl($scope, Reservatorio, RESTAPI, LEGENDCOLORS, olData, $location) {
+  function MapaCtrl($scope, Reservatorio, RESTAPI, LEGENDCOLORS, olData, $location, $timeout, $window) {
     var vm = this;
     vm.reservatorios = [];
     vm.municipios = [];
@@ -22,6 +22,18 @@
     vm.showLegend = false;
     vm.showShare = false;
     vm.gotError = false;
+    vm.criticalMapError = false;
+    vm.debugMap = {
+      olLoaded: !!$window.ol,
+      mapResolved: false,
+      viewportFound: false,
+      layerCount: 0,
+      mapSize: 'unknown',
+      apiInfo: 'pending',
+      apiGeolocalizacao: 'pending',
+      apiEstados: 'pending',
+      messages: []
+    };
     vm.RESTAPI = RESTAPI;
     vm.municipioReservatorio = [];
     vm.reservs = {};
@@ -85,10 +97,7 @@
           active: true,
           visible: true,
           source: {
-            type:"MapBoxStudio",
-            mapId:"cjgz3yuzu000j2rs5opg4x7g2",
-            userId:"diegocoelhoinsa",
-            accessToken:"pk.eyJ1IjoiZGllZ29jb2VsaG9pbnNhIiwiYSI6ImNqZ3ozdTJnMDBpcmEyeG50YjEzY2l2dTQifQ.baZTq3TNsn9zqxzvDY1P8Q"
+            type: 'OSM'
           }
         },
         {
@@ -154,11 +163,19 @@
     };
     vm.reservatoriosGeo = [];
     vm.estadoEquivalente = [];
-    vm.estadoAtual = {};
+    vm.estadoAtual = {
+      semiarido: 'Semiarido',
+      uf: 'Semiarido',
+      total_reservatorios: 0,
+      quant_reservatorio_sem_info: 0,
+      capacidade_equivalente: 0,
+      volume_equivalente: 0,
+      porcentagem_equivalente: 0
+    };
     var previousFeature;
 
-    vm.volumes_recentes_estado = {};
-    vm.volume_estado = []
+    vm.volumes_recentes_estado = { volumes: [] };
+    vm.volume_estado = [];
 
     vm.coresReservatorios = LEGENDCOLORS.reservoirsColors;
 
@@ -177,12 +194,47 @@
     vm.setMunicipio = setMunicipio;
     vm.setReservatorioMunicipio = setReservatorioMunicipio;
 
+    function pushDebug(message) {
+      vm.debugMap.messages.unshift(message);
+      vm.debugMap.messages = vm.debugMap.messages.slice(0, 8);
+    }
+
+    function inspectMapState() {
+      var mapElement = $window.document.getElementById('map');
+      vm.debugMap.olLoaded = !!$window.ol;
+      vm.debugMap.viewportFound = !!(mapElement && mapElement.querySelector('.ol-viewport'));
+      vm.debugMap.mapSize = mapElement ? (mapElement.offsetWidth + 'x' + mapElement.offsetHeight) : 'missing';
+
+      olData.getMap().then(function(map) {
+        vm.debugMap.mapResolved = true;
+        vm.debugMap.layerCount = map.getLayers().getLength();
+        map.updateSize();
+        pushDebug('map resolved, layers=' + vm.debugMap.layerCount);
+      }, function(error) {
+        pushDebug('olData.getMap failed');
+      });
+    }
+
+    function onWindowError(event) {
+      var message = event && event.message ? event.message : 'unknown runtime error';
+      pushDebug('window error: ' + message);
+      $scope.$evalAsync();
+    }
+
+    $window.addEventListener('error', onWindowError);
+    $scope.$on('$destroy', function() {
+      $window.removeEventListener('error', onWindowError);
+    });
+
     function init() {
       Reservatorio.info.query(function(data) {
         vm.reservatorios = data;
+        vm.debugMap.apiInfo = 'ok (' + data.length + ')';
         if (Number.isInteger(parseInt($location.search().id)) && vm.reservatoriosGeo.length) {
           vm.setReservatorio(parseInt($location.search().id));
         }
+      }, function() {
+        vm.debugMap.apiInfo = 'error';
       });
 
       Reservatorio.municipioReservatorio.query(function(data) {
@@ -193,13 +245,15 @@
         vm.municipios = data;
       });
 
-      Reservatorio.geolocalizacao.query(function(data) {
-        vm.reservatoriosGeo = data.features;
+      function attachReservatoriosLayer(data) {
+        vm.reservatoriosGeo = (data && data.features) ? data.features : [];
+        vm.debugMap.apiGeolocalizacao = 'ok (' + vm.reservatoriosGeo.length + ' features)';
         if (Number.isInteger(parseInt($location.search().id)) && vm.reservatorios.length) {
           vm.setReservatorio(parseInt($location.search().id));
         }
         vm.map.layers.push({
           name: 'reservatorios',
+          visible: true,
           source: {
             type: 'GeoJSON',
             geojson: {
@@ -210,21 +264,124 @@
           style: reservStyle(),
           opacity: 1
         });
+      }
+
+      Reservatorio.geolocalizacao.query(function(data) {
+        attachReservatoriosLayer(data);
 
         vm.loadingMap = false;
       }, function(error) {
+        vm.debugMap.apiGeolocalizacao = 'error';
+        attachReservatoriosLayer({ type: 'FeatureCollection', features: [] });
         vm.loadingMap = false;
-        vm.gotError = true;
+        vm.gotError = false;
       });
       vm.resetCopyUrl();
+      $timeout(inspectMapState, 500);
+      $timeout(inspectMapState, 2000);
     }
     init();
+
+    function findReservatorioMarker(id) {
+      for (var i = 0; i < vm.reservatoriosGeo.length; i++) {
+        if (parseInt(vm.reservatoriosGeo[i].properties.id) === parseInt(id)) {
+          var lat = parseFloat(vm.reservatoriosGeo[i].properties.latitude);
+          var lon = parseFloat(vm.reservatoriosGeo[i].properties.longitude);
+          if (!isNaN(lat) && !isNaN(lon)) {
+            return {
+              lat: lat,
+              lon: lon
+            };
+          }
+          break;
+        }
+      }
+      return null;
+    }
+
+    function parseMonitoramentoSeries(series) {
+      var items = [];
+      if (!angular.isArray(series)) {
+        return items;
+      }
+
+      for (var i = 0; i < series.length; i++) {
+        var item = series[i];
+        var percentual = item && item.VolumePercentual;
+        if (!item || !item.DataInformacao || percentual === null || typeof percentual === 'undefined' || isNaN(parseFloat(percentual))) {
+          continue;
+        }
+        items.push(item);
+      }
+
+      return items;
+    }
+
+    function calculateRegression(series) {
+      var validSeries = parseMonitoramentoSeries(series);
+      var total = validSeries.length;
+      var sumX = 0;
+      var sumY = 0;
+      var sumXX = 0;
+      var sumXY = 0;
+
+      if (total < 2) {
+        return 0;
+      }
+
+      for (var i = 0; i < total; i++) {
+        var x = i + 1;
+        var y = parseFloat(validSeries[i].VolumePercentual);
+        sumX += x;
+        sumY += y;
+        sumXX += x * x;
+        sumXY += x * y;
+      }
+
+      var denominator = (total * sumXX) - (sumX * sumX);
+      if (!denominator) {
+        return 0;
+      }
+
+      return ((total * sumXY) - (sumX * sumY)) / denominator;
+    }
+
+    function buildRecentMonitoramentoFallback(series) {
+      var validSeries = parseMonitoramentoSeries(series);
+      var recentSeries = validSeries.slice(Math.max(validSeries.length - 7, 0));
+
+      return {
+        coeficiente_regressao: calculateRegression(recentSeries),
+        data_inicial: recentSeries.length ? recentSeries[0].DataInformacao : null,
+        data_final: recentSeries.length ? recentSeries[recentSeries.length - 1].DataInformacao : null,
+        volumes: recentSeries
+      };
+    }
+
+    function normalizeRecentMonitoramento(recentData, series) {
+      if (recentData && angular.isArray(recentData.volumes) && recentData.volumes.length) {
+        return recentData;
+      }
+
+      return buildRecentMonitoramentoFallback(series);
+    }
+
+    function normalizeMonitoramentoResponse(data) {
+      var volumes = angular.isArray(data && data.volumes) ? data.volumes : [];
+
+      return {
+        volumes: volumes,
+        volumes_recentes: normalizeRecentMonitoramento(data && data.volumes_recentes, volumes)
+      };
+    }
 
     function setReservatorio(id) {
       vm.loadingInfo = true;
       vm.showInfo = true;
       vm.showSearchbar = false;
       vm.showLegend = false;
+      vm.map.markers_reserv = [];
+      vm.reservatorioSelecionado = {};
 
       for (var i = 0; i < vm.reservatorios.length; i++) {
         if (parseInt(vm.reservatorios[i].id) === id) {
@@ -232,30 +389,51 @@
           break;
         }
       }
-      if (vm.reservatorioSelecionado.id) {
-        for (var i = 0; i < vm.reservatoriosGeo.length; i++) {
-          if (vm.reservatoriosGeo[i].properties.id === vm.reservatorioSelecionado.id) {
-            vm.map.markers_reserv = [{
-              lat: parseFloat(vm.reservatoriosGeo[i].properties.latitude),
-              lon: parseFloat(vm.reservatoriosGeo[i].properties.longitude)
-            }];
-            break;
-          }
-        }
+      if (!vm.reservatorioSelecionado.id) {
+        vm.loadingInfo = false;
+        pushDebug('reservatorio nao encontrado para id=' + id);
+        return;
+      }
+
+      var marker = findReservatorioMarker(vm.reservatorioSelecionado.id);
+      if (marker) {
+        vm.map.markers_reserv = [marker];
+      } else {
+        pushDebug('reservatorio sem geolocalizacao para id=' + vm.reservatorioSelecionado.id);
+      }
+
+      vm.reservatorioSelecionado.volumes = [];
+      vm.reservatorioSelecionado.volumes_recentes = { volumes: [] };
+
         $location.search('id', vm.reservatorioSelecionado.id);
         $location.search('reservatorio', vm.reservatorioSelecionado.nome_sem_acento.replace(/ /g, "_").toLowerCase());
         updateShareData(vm.reservatorioSelecionado.reservat, vm.reservatorioSelecionado.id);
 
-        efeitoZoom(vm.map.markers_reserv[0].lat, vm.map.markers_reserv[0].lon, 10);
+        if (marker) {
+          efeitoZoom(marker.lat, marker.lon, 10);
+        }
         Reservatorio.monitoramento.query({id: vm.reservatorioSelecionado.id}, function(data) {
-          vm.reservatorioSelecionado.volumes = data.volumes;
-          vm.reservatorioSelecionado.volumes_recentes = data.volumes_recentes;
+          var monitoramento = normalizeMonitoramentoResponse(data);
+          vm.reservatorioSelecionado.volumes = monitoramento.volumes;
+          vm.reservatorioSelecionado.volumes_recentes = monitoramento.volumes_recentes;
+          // Sobrescreve a data_informacao inválida (%d/%m/%Y) vinda do /info
+          if (monitoramento.volumes.length) {
+            var lastVol = monitoramento.volumes[monitoramento.volumes.length - 1];
+            if (lastVol && lastVol.DataInformacao) {
+              vm.reservatorioSelecionado.data_informacao = lastVol.DataInformacao;
+              vm.reservatorioSelecionado.fonte = lastVol.Fonte || vm.reservatorioSelecionado.fonte;
+            }
+          }
           vm.loadingInfo = false;
+        }, function() {
+          vm.reservatorioSelecionado.volumes = [];
+          vm.reservatorioSelecionado.volumes_recentes = { volumes: [] };
+          vm.loadingInfo = false;
+          pushDebug('monitoramento indisponivel para id=' + vm.reservatorioSelecionado.id);
         });
         // Reservatorio.previsoes.query({id: vm.reservatorioSelecionado.id}, function(data) {
         //   vm.reservatorioSelecionado.previsoes = data;
         // });
-      }
     }
 
     function setMunicipio(municipio) {
@@ -263,11 +441,19 @@
       vm.showSearchbar = false;
       vm.showLegend = false;
 
-      efeitoZoom(parseFloat(vm.municipioSelecionado.latitude),parseFloat(vm.municipioSelecionado.longitude),10);
-      vm.map.markers_municipio = [{
-        lat: parseFloat(vm.municipioSelecionado.latitude),
-        lon: parseFloat(vm.municipioSelecionado.longitude)
-      }];
+      var lat = parseFloat(vm.municipioSelecionado.latitude);
+      var lon = parseFloat(vm.municipioSelecionado.longitude);
+
+      vm.map.markers_municipio = [];
+      if (!isNaN(lat) && !isNaN(lon)) {
+        efeitoZoom(lat, lon, 10);
+        vm.map.markers_municipio = [{
+          lat: lat,
+          lon: lon
+        }];
+      } else {
+        pushDebug('municipio sem geolocalizacao para id=' + vm.municipioSelecionado.id_municipio);
+      }
     }
 
     function setReservatorioMunicipio(id,tipo) {
@@ -289,17 +475,27 @@
 
     function setSelectedMapType(type) {
       vm.selectedMapType = type;
+      
+      // Update layers visibility based on type
+      for (var i = 0; i < vm.map.layers.length; i++) {
+        var layerName = vm.map.layers[i].name;
+        if (layerName === 'SemiaridoDark') {
+          vm.map.layers[i].visible = (type === 1);
+        } else if (layerName === 'Semiarido') {
+          vm.map.layers[i].visible = (type === 0 || type === 2);
+        } else if (layerName === 'reservatorios') {
+          vm.map.layers[i].visible = (type === 0 || type === 2);
+        }
+      }
+
       if (type == 1) {
         const uf = $location.search().uf;
         $location.search({});
         $location.search("uf", uf);
         setEstado(uf || "Semiarido");
-        vm.map.markers_reserv.pop();
-        vm.map.markers_municipio.pop();
+        vm.map.markers_reserv = [];
+        vm.map.markers_municipio = [];
         vm.reservatorioSelecionado = {};
-        vm.map.layers[1].visible = false;
-        vm.map.layers[2].visible = true;
-        //vm.map.layers[3].opacity = 0.4;
         if (larguraTela <= 640) {
           vm.showInfo = false;
         }
@@ -310,10 +506,6 @@
           previousFeature.setStyle(null);
           previousFeature = null;
         }
-        vm.map.layers[1].visible = true;
-        vm.map.layers[2].visible = false;
-        vm.map.layers[3].opacity = 1;
-
       }
       efeitoZoom(vm.latitude, vm.longitude, vm.zoomInicial);
     }
@@ -475,6 +667,7 @@
     Reservatorio.estadoEquivalente.query(function(response) {
       vm.loadingInfo = true;
       vm.estadoEquivalente = response;
+      vm.debugMap.apiEstados = 'ok (' + response.length + ')';
       if($location.search().uf){
         setSelectedTab(5);
         setSelectedMapType(1);
@@ -483,7 +676,11 @@
       vm.loadingInfo = false;
     }, function(error) {
       vm.loadingInfo = false;
-      vm.gotError = true;
+      vm.debugMap.apiEstados = 'error';
+      // Keep map usable even if the state summary endpoint is down.
+      vm.estadoEquivalente = [];
+      vm.volumes_recentes_estado = { volumes: [] };
+      vm.volume_estado = [];
     });
 
     function setEstado(uf) {
@@ -504,8 +701,35 @@
 
     function setVolumesRecentesEstado(uf){
      Reservatorio.monitoramento_estado.query({uf:uf}, function(data) {
-       vm.volumes_recentes_estado = data.volumes_recentes;
-       vm.volume_estado = data.volumes;
+       var monitoramento = normalizeMonitoramentoResponse(data);
+       vm.volumes_recentes_estado = monitoramento.volumes_recentes;
+       vm.volume_estado = monitoramento.volumes;
+       
+       // Sincroniza o painel esquerdo com o último dado real do gráfico
+       if (monitoramento.volumes && monitoramento.volumes.length > 0) {
+         var lastVol = monitoramento.volumes[monitoramento.volumes.length - 1];
+         if (lastVol) {
+           vm.estadoAtual.porcentagem_equivalente = lastVol.VolumePercentual;
+           vm.estadoAtual.volume_equivalente = lastVol.Volume;
+           if (lastVol.CapacidadeTotal) {
+             vm.estadoAtual.capacidade_equivalente = lastVol.CapacidadeTotal;
+           }
+           if (lastVol.total_reservatorios !== undefined) {
+             vm.estadoAtual.total_reservatorios = lastVol.total_reservatorios;
+             vm.estadoAtual.quant_reservatorio_sem_info = lastVol.quant_reservatorio_sem_info;
+             vm.estadoAtual.quant_reservatorio_com_info = lastVol.quant_reservatorio_com_info;
+             vm.estadoAtual.quant_reserv_intervalo_1 = lastVol.quant_reserv_intervalo_1;
+             vm.estadoAtual.quant_reserv_intervalo_2 = lastVol.quant_reserv_intervalo_2;
+             vm.estadoAtual.quant_reserv_intervalo_3 = lastVol.quant_reserv_intervalo_3;
+             vm.estadoAtual.quant_reserv_intervalo_4 = lastVol.quant_reserv_intervalo_4;
+             vm.estadoAtual.quant_reserv_intervalo_5 = lastVol.quant_reserv_intervalo_5;
+           }
+         }
+       }
+     }, function() {
+       vm.volumes_recentes_estado = { volumes: [] };
+       vm.volume_estado = [];
+       pushDebug('monitoramento do estado indisponivel para uf=' + uf);
      });
    }
 
@@ -542,7 +766,8 @@ function shareOverrideOGMeta()
 }
 
 
-    var featureId;
+    var clickedUf = null;
+
     $scope.$on('openlayers.layers.SemiaridoDark.click', function(event, feature) {
       $scope.$apply(function() {
           if (feature && isSelectedMapType(1)) {
@@ -553,26 +778,27 @@ function shareOverrideOGMeta()
                 previousFeature.setStyle(null);
               }
               previousFeature = feature;
-              featureId = feature.getId();
-
+              var props = feature.getProperties ? feature.getProperties() : {};
+              clickedUf = feature.getId() || props.id || props.uf || props.UF || props.name;
           }
       });
     });
 
-
-    $scope.$on('openlayers.map.singleclick', function(event, feature) {
+    $scope.$on('openlayers.map.singleclick', function(event, data) {
       $scope.$apply(function() {
-          if (feature && isSelectedMapType(1)) {
-              setTimeout(function(){
-                if(featureId) {
-                  setEstado(featureId);
-                  featureId = null;
-                }else setEstado("Semiarido");
-              }, 50);
-              if (previousFeature){
-                previousFeature.setStyle(null);
-                previousFeature = null;
+          if (isSelectedMapType(1)) {
+            setTimeout(function() {
+              if (clickedUf) {
+                setEstado(clickedUf);
+                clickedUf = null;
+              } else {
+                if (previousFeature) {
+                  previousFeature.setStyle(null);
+                  previousFeature = null;
+                }
+                setEstado("Semiarido");
               }
+            }, 50);
           }
       });
     });

@@ -33,7 +33,7 @@ module.exports = function(config) {
       'bower_components/angular-openlayers-directive/dist/angular-openlayers-directive.min.js',
       'bower_components/spin.js/spin.js',
       'bower_components/angular-spinner/angular-spinner.js',
-      'bower_components/SHA-1/sha1.js',
+      'bower_components/SHA-1/dist/sha1.umd.js',
       'bower_components/angulartics/src/angulartics.js',
       'bower_components/angulartics-google-analytics/lib/angulartics-ga.js',
       'bower_components/angular-socialshare/dist/angular-socialshare.min.js',
